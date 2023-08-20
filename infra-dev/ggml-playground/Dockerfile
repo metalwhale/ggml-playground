@@ -17,8 +17,13 @@ RUN PLATFORM=`uname -m` \
     && chmod +x /usr/local/bin/zls
 ENV PATH="$PATH:${ZIG_PATH}"
 
+# Install rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
 # Install python and packages
 RUN apt install -y python3 python3-pip
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt \
+RUN pip install pip==23.2.1
+RUN PATH="$HOME/.cargo/bin:$PATH" \
+    && pip install -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt

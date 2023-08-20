@@ -1,0 +1,11 @@
+version: "3"
+services:
+  ggml-playground:
+    build: ./ggml-playground
+    environment:
+      - TORCH_HOME=/usr/src/ggml-playground/.cache/torch
+      - HF_HOME=/usr/src/ggml-playground/.cache/huggingface
+    volumes:
+      - ../:/usr/src/ggml-playground
+    tty: true
+    working_dir: /usr/src/ggml-playground/ggml-playground

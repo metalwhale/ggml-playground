@@ -24,6 +24,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Ref: https://github.com/sjinzh/ggml-zig/blob/c6e32cb/build.zig#L65-L70
+    exe.addIncludePath(.{ .path = "./ggml/include" });
+    exe.addIncludePath(.{ .path = "./ggml/include/ggml" });
+    exe.addCSourceFiles(&.{"./ggml/src/ggml.c"}, &.{"-std=c11"});
+    exe.linkLibC();
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

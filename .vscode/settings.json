@@ -3,5 +3,6 @@
     "zig.zls.path": "/usr/local/bin/zls",
     "[python]": {
         "editor.defaultFormatter": "ms-python.autopep8"
-    }
+    },
+    "jupyter.debugJustMyCode": false
 }

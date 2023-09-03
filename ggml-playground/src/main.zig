@@ -1,5 +1,5 @@
 const std = @import("std");
-const Model = @import("model/gpt_neox.zig").GptNeox;
+const Model = @import("model/gpt_neox.zig").Model;
 
 pub fn main() !void {
     // Allocator
@@ -15,7 +15,11 @@ pub fn main() !void {
     }
     const model_dir_path = args[1];
     // Initialize model
-    const model = try Model.init(allocator, model_dir_path);
+    const model = try Model.init(allocator, .{
+        // See: https://huggingface.co/rinna/japanese-gpt-neox-small/blob/f33d445/config.json
+        .num_attention_heads = 12,
+        .rotary_pct = 1.0,
+    }, model_dir_path);
     defer model.deinit();
     // Estimate the required memory for each token in advance using a set of initial arbitrary tokens
     // Remember: actually, the total memory required for running graph computation doesn't scale linearly with the number of tokens
@@ -24,7 +28,7 @@ pub fn main() !void {
     const per_token_mem_size = model.forward(default_context_mem_size, &arbitrary_tokens) /
         arbitrary_tokens.len;
     // Inference
-    const tokens = [_]i32{14041}; // "こんにちは". TODO: Use tokenizer
+    const tokens = [_]i32{ 14041, 7, 1967, 12, 741, 699, 31 }; // "こんにちは、猫は好きですか？". TODO: Use tokenizer
     const context_mem_size = @max(per_token_mem_size * tokens.len, default_context_mem_size); // TODO: Choose a better way
     _ = model.forward(context_mem_size, &tokens);
 }

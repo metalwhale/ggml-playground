@@ -10,6 +10,8 @@ const I32 = ggml.GGML_TYPE_I32;
 const Config = struct {
     num_attention_heads: usize,
     rotary_pct: f32,
+    use_parallel_residual: bool,
+    hidden_act: []const u8,
 };
 
 // See:
@@ -65,10 +67,11 @@ pub const Model = struct {
         // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L623
         const inputs_embeds = self.param.embed_in.forward(context, input_ids);
         // Hidden Layer(s)
-        const outputs = self.param.layers[0].forward(context, inputs_embeds);
+        // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L658
+        const hidden_states = self.param.layers[0].forward(context, inputs_embeds);
         // Run computation
         const gf = ggml.ggml_new_graph(context);
-        ggml.ggml_build_forward_expand(gf, outputs);
+        ggml.ggml_build_forward_expand(gf, hidden_states);
         ggml.ggml_graph_compute_with_ctx(context, gf, 4); // TODO: Use num_threads
         return ggml.ggml_used_mem(context);
     }
@@ -150,6 +153,8 @@ const Param = struct {
                 arch,
                 config.num_attention_heads,
                 config.rotary_pct,
+                config.use_parallel_residual,
+                config.hidden_act,
             );
             _ = try common.readParam(param_file, layer.*.input_layernorm_weight);
             _ = try common.readParam(param_file, layer.*.input_layernorm_bias);
@@ -211,6 +216,8 @@ const Layer = struct {
     const Self = @This();
     num_attention_heads: usize,
     rotary_pct: f32,
+    use_parallel_residual: bool,
+    hidden_act: []const u8,
     input_layernorm_weight: Tensor,
     input_layernorm_bias: Tensor,
     post_attention_layernorm_weight: Tensor,
@@ -224,7 +231,14 @@ const Layer = struct {
     mlp_dense_4h_to_h_weight: Tensor,
     mlp_dense_4h_to_h_bias: Tensor,
 
-    fn init(context: Context, arch: Arch, num_attention_heads: usize, rotary_pct: f32) Self {
+    fn init(
+        context: Context,
+        arch: Arch,
+        num_attention_heads: usize,
+        rotary_pct: f32,
+        use_parallel_residual: bool,
+        hidden_act: []const u8,
+    ) Self {
         const hidden_size: i64 = @intCast(arch.hidden_size);
         const intermediate_size: i64 = @intCast(arch.intermediate_size);
         const input_layernorm_weight = ggml.ggml_new_tensor_1d(context, F32, hidden_size);
@@ -278,6 +292,8 @@ const Layer = struct {
         return Self{
             .num_attention_heads = num_attention_heads,
             .rotary_pct = rotary_pct,
+            .use_parallel_residual = use_parallel_residual,
+            .hidden_act = hidden_act,
             .input_layernorm_weight = input_layernorm_weight,
             .input_layernorm_bias = input_layernorm_bias,
             .post_attention_layernorm_weight = post_attention_layernorm_weight,
@@ -294,15 +310,34 @@ const Layer = struct {
     }
 
     // See: https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L410
+    // Inputs: `hidden_states` has ne = (hidden_size, sequence_length, 1, 1)
     fn forward(self: Self, context: Context, hidden_states: Tensor) Tensor {
-        const input_layernorm_output = common.layernorm(
+        var attn_output = self.attention(context, common.layernorm(
             context,
             hidden_states,
             self.input_layernorm_weight,
             self.input_layernorm_bias,
-        ); // ne = (hidden_size, sequence_length, 1, 1)
-        const attn_output = self.attention(context, input_layernorm_output);
-        return attn_output;
+        )); // ne = (hidden_size, sequence_length, 1, 1)
+        attn_output = ggml.ggml_add(context, attn_output, hidden_states); // ne = (hidden_size, sequence_length, 1, 1)
+        // NOTE: Currently, only handle one case where `use_parallel_residual` = false
+        var mlp_output: Tensor = undefined;
+        if (self.use_parallel_residual) {
+            unreachable;
+        } else {
+            mlp_output = self.mlp(
+                context,
+                common.layernorm(
+                    context,
+                    attn_output,
+                    self.post_attention_layernorm_weight,
+                    self.post_attention_layernorm_bias,
+                ),
+                self.hidden_act,
+            ); // ne = (hidden_size, sequence_length, 1, 1)
+        }
+        // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L446
+        const output = ggml.ggml_add(context, mlp_output, attn_output); // ne = (hidden_size, sequence_length, 1, 1)
+        return output;
     }
 
     // See: https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L148
@@ -369,6 +404,33 @@ const Layer = struct {
             self.attention_dense_bias,
         ); // ne = (hidden_size, sequence_length, 1, 1)
         return attn_output;
+    }
+
+    // See: https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L392
+    // Inputs: `hidden_states` has ne = (hidden_size, sequence_length, 1, 1)
+    fn mlp(self: Self, context: Context, hidden_states: Tensor, hidden_act: []const u8) Tensor {
+        // NOTE: Currently, only handle one case where `hidden_act` = "gelu"
+        var act: *const fn (?Context, Tensor) callconv(.C) Tensor = undefined;
+        if (std.mem.eql(u8, hidden_act, "gelu")) {
+            act = ggml.ggml_gelu;
+        } else {
+            unreachable;
+        }
+        // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L393
+        var mlp_output = common.linear(
+            context,
+            hidden_states,
+            self.mlp_dense_h_to_4h_weight,
+            self.mlp_dense_h_to_4h_bias,
+        ); // ne = (intermediate_size, sequence_length, 1, 1)
+        // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L395
+        mlp_output = common.linear(
+            context,
+            act(context, mlp_output),
+            self.mlp_dense_4h_to_h_weight,
+            self.mlp_dense_4h_to_h_bias,
+        ); // ne = (hidden_size, sequence_length, 1, 1)
+        return mlp_output;
     }
 };
 

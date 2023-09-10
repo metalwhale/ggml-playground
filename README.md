@@ -17,5 +17,5 @@ ML model inference in Zig using ggml
 3. Inference:
     ```bash
     cd ../ggml-playground/
-    zig build run -- ../models/gpt_neox/rinna-japanese-gpt-neox/
+    zig build test
     ```

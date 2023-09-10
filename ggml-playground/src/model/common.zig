@@ -20,10 +20,13 @@ pub fn layernorm(context: Context, input: Tensor, weight: Tensor, bias: Tensor) 
 }
 
 // See: https://pytorch.org/docs/2.0/generated/torch.nn.Linear.html
-pub fn linear(context: Context, input: Tensor, weight: Tensor, bias: Tensor) Tensor {
+pub fn linear(context: Context, input: Tensor, weight: Tensor, bias: ?Tensor) Tensor {
     var cur: Tensor = undefined;
     cur = ggml.ggml_mul_mat(context, weight, input);
-    return ggml.ggml_add(context, cur, ggml.ggml_repeat(context, bias, cur));
+    if (bias) |b| {
+        cur = ggml.ggml_add(context, cur, ggml.ggml_repeat(context, b, cur));
+    }
+    return cur;
 }
 
 // See:

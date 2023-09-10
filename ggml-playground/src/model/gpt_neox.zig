@@ -14,6 +14,32 @@ const Config = struct {
     hidden_act: []const u8,
 };
 
+const Output = struct {
+    const Self = @This();
+    allocator: Allocator,
+    logits: [][]f32,
+    used_mem: usize,
+
+    fn init(allocator: Allocator, lm_logits: Tensor, used_mem: usize) !Self {
+        const vocab_size: usize = @intCast(lm_logits.*.ne[0]);
+        const sequence_length: usize = @intCast(lm_logits.*.ne[1]);
+        const logits = try allocator.alloc([]f32, sequence_length);
+        const logits_data = common.getData(f32, lm_logits);
+        for (logits, 0..) |*logit, i| {
+            logit.* = try allocator.alloc(f32, vocab_size);
+            std.mem.copy(f32, logit.*, logits_data[i * vocab_size .. (i + 1) * vocab_size]);
+        }
+        return Self{ .allocator = allocator, .logits = logits, .used_mem = used_mem };
+    }
+
+    pub fn deinit(self: Self) void {
+        for (self.logits) |logit| {
+            self.allocator.free(logit);
+        }
+        self.allocator.free(self.logits);
+    }
+};
+
 // See:
 // - https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L692
 // - https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L513
@@ -52,7 +78,7 @@ pub const Model = struct {
     // - https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L712
     // - https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L541
     // - https://github.com/ggerganov/ggml/blob/08c57df/examples/gpt-neox/main.cpp#L429
-    pub fn forward(self: Self, context_mem_size: usize, tokens: []const i32) usize {
+    pub fn forward(self: Self, context_mem_size: usize, tokens: []const i32) !Output {
         // Init context
         const context = ggml.ggml_init(.{
             .mem_size = context_mem_size,
@@ -67,13 +93,22 @@ pub const Model = struct {
         // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L623
         const inputs_embeds = self.param.embed_in.forward(context, input_ids);
         // Hidden Layer(s)
-        // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L658
-        const hidden_states = self.param.layers[0].forward(context, inputs_embeds);
+        var hidden_states = inputs_embeds;
+        for (self.param.layers) |layer| {
+            // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L658
+            hidden_states = layer.forward(context, hidden_states);
+        }
+        // FinalLayerNorm
+        // https://github.com/huggingface/transformers/blob/v4.32.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py#L673
+        hidden_states = self.param.final_layer_norm.forward(context, hidden_states);
+        // EmbedOut
+        const lm_logits = self.param.embed_out.forward(context, hidden_states);
         // Run computation
         const gf = ggml.ggml_new_graph(context);
-        ggml.ggml_build_forward_expand(gf, hidden_states);
+        ggml.ggml_build_forward_expand(gf, lm_logits);
         ggml.ggml_graph_compute_with_ctx(context, gf, 4); // TODO: Use num_threads
-        return ggml.ggml_used_mem(context);
+        const output = try Output.init(self.allocator, lm_logits, ggml.ggml_used_mem(context));
+        return output;
     }
 };
 
@@ -448,6 +483,10 @@ const FinalLayerNorm = struct {
             .bias = bias,
         };
     }
+
+    fn forward(self: Self, context: Context, input: Tensor) Tensor {
+        return common.layernorm(context, input, self.weight, self.bias);
+    }
 };
 
 const EmbedOut = struct {
@@ -463,4 +502,42 @@ const EmbedOut = struct {
         );
         return Self{ .weight = weight };
     }
+
+    fn forward(self: Self, context: Context, input: Tensor) Tensor {
+        return common.linear(context, input, self.weight, null);
+    }
 };
+
+test "Simple forward" {
+    // Allocator
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+    const model_dir_path = "../models/gpt_neox/rinna-japanese-gpt-neox/";
+    // Initialize model
+    const model = try Model.init(allocator, .{
+        // See: https://huggingface.co/rinna/japanese-gpt-neox-small/blob/f33d445/config.json
+        .num_attention_heads = 12,
+        .rotary_pct = 1.0,
+        .use_parallel_residual = false,
+        .hidden_act = "gelu",
+    }, model_dir_path);
+    defer model.deinit();
+    // Estimate the required memory for each token in advance using a set of initial arbitrary tokens
+    // TODO: Choose a better way
+    const default_context_mem_size = 256 * 1024 * 1024;
+    const output_one = try model.forward(default_context_mem_size, &[_]i32{0});
+    output_one.deinit();
+    const output_two = try model.forward(default_context_mem_size, &[_]i32{ 0, 0 });
+    output_two.deinit();
+    // Inference
+    const tokens = [_]i32{ 14041, 7, 1967, 12, 741, 699, 31 }; // "こんにちは、猫は好きですか？". TODO: Use tokenizer
+    const context_mem_size = output_one.used_mem + (tokens.len - 1) * (output_two.used_mem - output_one.used_mem);
+    const output = try model.forward(context_mem_size, &tokens);
+    defer output.deinit();
+    // Assertions
+    const expect = std.testing.expect;
+    const last_logits = output.logits[output.logits.len - 1];
+    const next_token = std.sort.argMax(f32, last_logits, {}, std.sort.asc(f32));
+    try expect(next_token == 8);
+}

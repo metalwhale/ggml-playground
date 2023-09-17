@@ -8,11 +8,10 @@ ML model inference in Zig using ggml
     docker-compose up -d
     docker-compose exec -it ggml-playground bash
     ```
-2. Convert [Rinna's `japanese-gpt-neox-small`](https://huggingface.co/rinna/japanese-gpt-neox-small) model:
+2. Convert models:
     ```bash
     cd ./models/
-    mkdir -p ./gpt_neox/rinna-japanese-gpt-neox
-    python3 ./convert.py "rinna/japanese-gpt-neox-small" ./gpt_neox/rinna-japanese-gpt-neox/
+    python3 ./convert.py gpt_neox "rinna/japanese-gpt-neox-small"
     ```
 3. Inference:
     ```bash

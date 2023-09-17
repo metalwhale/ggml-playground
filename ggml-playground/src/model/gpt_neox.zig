@@ -513,7 +513,7 @@ test "Simple forward" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const model_dir_path = "../models/gpt_neox/rinna-japanese-gpt-neox/";
+    const model_dir_path = "../models/gpt_neox/rinna_japanese-gpt-neox-small/";
     // Initialize model
     const model = try Model.init(allocator, .{
         // See: https://huggingface.co/rinna/japanese-gpt-neox-small/blob/f33d445/config.json

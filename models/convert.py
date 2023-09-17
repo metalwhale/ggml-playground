@@ -1,17 +1,20 @@
 import json
+import os
 import struct
 import sys
+from pathlib import Path
+
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 if len(sys.argv) < 3:
-    print(f"Usage: python3 {sys.argv[0]} <MODEL_NAME> <MODEL_DIR_PATH>")
+    print(f"Usage: python3 {sys.argv[0]} <MODEL_TYPE> <MODEL_NAME>")
     exit(1)
-_, model_name, model_dir_path = sys.argv[:3]
+_, model_type, model_name = sys.argv[:3]
 
-tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+model_dir_path = str(Path(__file__).parent / model_type / model_name.replace("/", "_"))
+os.makedirs(model_dir_path, exist_ok=True)
 model = AutoModelForCausalLM.from_pretrained(model_name)
-
 with open(f"{model_dir_path}/param.bin", "wb") as param_file, \
         open(f"{model_dir_path}/arch.json", "w") as arch_file:
     arch = {}
